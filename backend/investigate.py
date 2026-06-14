@@ -8,6 +8,8 @@ import json
 from dotenv import load_dotenv
 import requests
 
+from destination import resolve_destination
+
 load_dotenv()
 
 HF_API_KEY = os.getenv('HF_API_KEY', '')
@@ -83,6 +85,8 @@ def investigate_access(access_data: dict) -> str:
         Human-readable investigation summary string
     """
     
+    destination_type, destination_score = resolve_destination(access_data)
+
     prompt = f"""Analyze this data access event and provide a concise, professional risk assessment:
 
 User: {access_data.get('username', 'Unknown')} ({access_data.get('job_title', 'N/A')})
@@ -91,6 +95,7 @@ Privilege: {access_data.get('privilege_level', 'user')}
 
 Action: {access_data.get('action', 'unknown').replace('_', ' ')}
 Resource: {access_data.get('resource', 'Unknown')} (Sensitivity: {access_data.get('resource_sensitivity', 'unknown').upper()})
+Destination: {destination_type.replace('_', ' ')} (destination risk contribution: {destination_score})
 Time: {access_data.get('timestamp', 'Unknown')} ({access_data.get('time_classification', 'unknown').replace('_', ' ')})
 Data Volume: {access_data.get('rowcount', 0)} rows (user avg: {access_data.get('user_avg_rowcount', 0)}, deviation: {access_data.get('deviation_from_user_avg_rowcount', 0)})
 ML Anomaly Score: {access_data.get('ml_anomaly_score', 0):.1f}/100
@@ -132,6 +137,7 @@ def _fallback_investigation(data: dict) -> str:
     rowcount = data.get('rowcount', 0)
     deviation = data.get('deviation_from_user_avg_rowcount', 0)
     anomaly_score = data.get('ml_anomaly_score', 0)
+    destination_type, destination_score = resolve_destination(data)
     
     # Build summary
     factors = []
@@ -147,6 +153,10 @@ def _fallback_investigation(data: dict) -> str:
     
     if anomaly_score > 60:
         factors.append("unusual access pattern detected by ML model")
+    
+    # High-risk exfiltration destinations are a strong signal on their own.
+    if destination_score >= 15:
+        factors.append(f"data routed to {destination_type.replace('_', ' ').lower()} (destination risk +{destination_score})")
     
     factor_str = "; ".join(factors) if factors else "routine access"
     

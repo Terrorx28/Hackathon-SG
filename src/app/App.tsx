@@ -21,6 +21,38 @@ export interface EventRow {
   rowcount: number;
   user_avg_rowcount: number;
   deviation_from_user_avg_rowcount: number;
+  dest: string;
+  destScore: number;
+}
+
+// ── Destination-aware risk scoring ─────────────────────────────────────
+// Mirrors backend/destination.py. Maps a raw destination to a canonical
+// type + numeric risk contribution, defaulting safely to LOCAL_MACHINE.
+export const DESTINATION_RISK: Record<string, number> = {
+  LOCAL_MACHINE: 2,
+  CORPORATE_EMAIL: 5,
+  CLOUD_STORAGE: 15,
+  USB: 20,
+  PERSONAL_EMAIL: 25,
+};
+const DESTINATION_ALIASES: Record<string, string> = {
+  LOCAL: 'LOCAL_MACHINE', WORKSTATION: 'LOCAL_MACHINE', ENDPOINT: 'LOCAL_MACHINE',
+  CORP_EMAIL: 'CORPORATE_EMAIL', INTERNAL_EMAIL: 'CORPORATE_EMAIL', COMPANY_EMAIL: 'CORPORATE_EMAIL',
+  CLOUD: 'CLOUD_STORAGE', S3: 'CLOUD_STORAGE', DROPBOX: 'CLOUD_STORAGE', GDRIVE: 'CLOUD_STORAGE', GOOGLE_DRIVE: 'CLOUD_STORAGE',
+  USB_DRIVE: 'USB', REMOVABLE_MEDIA: 'USB', EXTERNAL_DRIVE: 'USB',
+  EXTERNAL_EMAIL: 'PERSONAL_EMAIL', GMAIL: 'PERSONAL_EMAIL', PERSONAL: 'PERSONAL_EMAIL',
+};
+export function normalizeDestination(raw: unknown): string {
+  if (!raw) return 'LOCAL_MACHINE';
+  const key = String(raw).trim().toUpperCase().replace(/[-\s]/g, '_');
+  if (key in DESTINATION_RISK) return key;
+  return DESTINATION_ALIASES[key] || 'LOCAL_MACHINE';
+}
+export function destinationScore(destType: string): number {
+  return DESTINATION_RISK[destType] ?? DESTINATION_RISK.LOCAL_MACHINE;
+}
+export function destColor(score: number) {
+  return score >= 20 ? '#ff4757' : score >= 15 ? '#ff8c00' : score >= 5 ? '#ffd700' : '#00e676';
 }
 export interface Profile {
   uid: string; user: string; email: string; dept: string; job: string;
@@ -75,6 +107,11 @@ function buildData(): DerivedData {
       ? rulesTriggered
       : pred.explanation ? [pred.explanation] : [];
 
+    // Destination defaults safely to LOCAL_MACHINE when absent in the data.
+    const destType = normalizeDestination(
+      pred.destination ?? pred.destination_type ?? pred.data_destination
+    );
+
     return {
       id: `${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`,
       ts: String(pred.timestamp || ''),
@@ -102,7 +139,9 @@ function buildData(): DerivedData {
       rules_triggered: rulesTriggered,
       rowcount: Number(pred.rowcount || 0),
       user_avg_rowcount: Number(pred.user_avg_rowcount || 0),
-      deviation_from_user_avg_rowcount: Number(pred.deviation_from_user_avg_rowcount || 0)
+      deviation_from_user_avg_rowcount: Number(pred.deviation_from_user_avg_rowcount || 0),
+      dest: destType,
+      destScore: destinationScore(destType)
     };
   });
 
@@ -491,6 +530,7 @@ function AlertsPage({ data, onShowIncident }: { data: DerivedData; onShowInciden
                     <span>⏱ {e.tc.replace(/_/g,' ')}</span>
                     <span style={{ fontFamily: 'monospace' }}>🌐 {e.ip}</span>
                     <span>🏢 {e.dept}</span>
+                    <span style={{ color: destColor(e.destScore) }}>📤 {e.dest.replace(/_/g,' ')} (+{e.destScore})</span>
                     <span style={{ color: e.status === 'failure' ? C.red : C.green }}>● {e.status}</span>
                   </div>
                   {e.reasons.length > 0 && (
@@ -1408,12 +1448,14 @@ function IncidentModal({ event, profileMap, onClose, onStartAI }: {
               ['Action', event.action.replace(/_/g,' ')], ['Resource', event.resource],
               ['Sensitivity', event.sens.toUpperCase()], ['Status', event.status],
               ['Source IP', event.ip], ['Time Class', event.tc.replace(/_/g,' ').toUpperCase()],
+              ['Destination', event.dest.replace(/_/g,' ')], ['Destination Risk', `+${event.destScore}`],
             ].map(([l, v]) => (
               <div key={l} style={{ background: C.bg3, borderRadius: 6, padding: '10px 12px' }}>
                 <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 3 }}>{l}</div>
                 <div style={{ fontSize: 13, fontWeight: 500, fontFamily: ['Source IP','User ID'].includes(l as string) ? 'monospace' : 'inherit',
                   color: l === 'Account' ? (event.active === 'true' ? C.green : C.red)
-                    : l === 'Status' ? (event.status === 'failure' ? C.red : C.green) : C.text }}>{v}</div>
+                    : l === 'Status' ? (event.status === 'failure' ? C.red : C.green)
+                    : (l === 'Destination' || l === 'Destination Risk') ? destColor(event.destScore) : C.text }}>{v}</div>
               </div>
             ))}
           </div>

@@ -16,6 +16,11 @@ import numpy as np
 import pandas as pd
 import requests
 from investigate import investigate_access
+from destination import (
+    DESTINATION_RISK,
+    resolve_destination,
+    apply_destination_risk,
+)
 
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 DEFAULT_LLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
@@ -136,18 +141,25 @@ def score_event():
         # Engineer features
         X = engineer_features(data)
         
-        # Get anomaly score
+        # Get anomaly score (Isolation Forest behavior is preserved as-is)
         anomaly_score = model.score_samples(X)[0]
         is_anomaly = model.predict(X)[0] == -1
         
-        # Normalize to 0-100
-        risk_score = normalize_score(anomaly_score)
+        # Normalize Isolation Forest output to 0-100 (base risk)
+        base_risk = normalize_score(anomaly_score)
+        
+        # Destination-aware scoring (defaults safely to LOCAL_MACHINE)
+        destination_type, destination_score = resolve_destination(data)
+        risk_score = apply_destination_risk(base_risk, destination_score)
         
         # Generate investigation
         investigation = investigate_access(data)
         
         return jsonify({
             'risk_score': risk_score,
+            'base_risk_score': base_risk,
+            'destination_type': destination_type,
+            'destination_score': destination_score,
             'anomaly_detected': bool(is_anomaly),
             'anomaly_score': float(anomaly_score),
             'investigation': investigation,
@@ -201,13 +213,20 @@ def batch_score():
         for event in events:
             X = engineer_features(event)
             anomaly_score = model.score_samples(X)[0]
-            risk_score = normalize_score(anomaly_score)
+            base_risk = normalize_score(anomaly_score)
+            
+            # Destination-aware scoring (defaults safely to LOCAL_MACHINE)
+            destination_type, destination_score = resolve_destination(event)
+            risk_score = apply_destination_risk(base_risk, destination_score)
             
             results.append({
                 'user_id': event.get('user_id'),
                 'username': event.get('username'),
                 'resource': event.get('resource'),
                 'risk_score': risk_score,
+                'base_risk_score': base_risk,
+                'destination_type': destination_type,
+                'destination_score': destination_score,
                 'anomaly_detected': model.predict(X)[0] == -1,
             })
         
@@ -231,7 +250,8 @@ def model_stats():
             'time_class_score',
             'action_score',
             'ml_anomaly_score'
-        ]
+        ],
+        'destination_risk': DESTINATION_RISK,
     })
 
 @app.route('/llm/chat', methods=['POST'])

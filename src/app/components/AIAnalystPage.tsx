@@ -165,6 +165,7 @@ function summarizeEvent(e: EventRow): string {
     ? ` | Rules: ${e.rules_triggered.join(', ')}`
     : '';
   return `[${e.sev}/${e.score}] ${e.user} (${e.dept}/${e.priv}): ${e.action.replace(/_/g,' ')} on ${e.resource} at ${fmtTs(e.ts)} [${e.tc.replace(/_/g,' ')}]` +
+    ` → ${e.dest.replace(/_/g,' ')} (dest +${e.destScore})` +
     ` [ML ${Math.round(e.ml_anomaly_score)}/Rule ${Math.round(e.rule_score)}]${ruleDetails}${e.reasons.length ? ' — ' + e.reasons.join('; ') : ''}`;
 }
 
