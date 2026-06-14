@@ -4,7 +4,7 @@ import anomalyPredictions from '../imports/anomaly_predictions.json';
 import evaluationMetrics from '../imports/evaluation_metrics.json';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend
+  PieChart, Pie, Cell, Legend, ComposedChart, Line
 } from 'recharts';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -652,15 +652,47 @@ function TimelinePage({ data, onShowIncident }: { data: DerivedData; onShowIncid
   const hourly = useMemo(() => {
     const h = new Array(24).fill(0);
     const ha = new Array(24).fill(0);
+    const sum = new Array(24).fill(0);
     events.forEach(e => {
       const timePart = String(e.ts || '').split(' ')[1] || '00:00:00';
       const hour = parseInt(timePart.split(':')[0] || '0', 10);
       const hr = Number.isNaN(hour) ? 0 : Math.min(Math.max(hour, 0), 23);
       h[hr]++;
+      sum[hr] += Number(e.score) || 0;
       if (String(e.sev || '').toUpperCase() === 'CRITICAL' || String(e.sev || '').toUpperCase() === 'HIGH') ha[hr]++;
     });
-    return Array.from({ length: 24 }, (_, i) => ({ hour: String(i).padStart(2, '0') + 'h', all: h[i], crit: ha[i] }));
+    return Array.from({ length: 24 }, (_, i) => ({
+      hour: String(i).padStart(2, '0') + 'h',
+      all: h[i], crit: ha[i],
+      avg: h[i] ? Math.round(sum[i] / h[i]) : 0,
+    }));
   }, [events]);
+
+  // Peak-risk window (highest average risk among hours that have activity).
+  const peakRisk = useMemo(() => {
+    return hourly.reduce((best, cur) => (cur.all > 0 && cur.avg > best.avg ? cur : best), { hour: '—', avg: 0, all: 0, crit: 0 });
+  }, [hourly]);
+
+  // Most-targeted resources for the current filter selection (un-capped).
+  const resourceInsights = useMemo(() => {
+    let list = sortedEvents;
+    if (userF) list = list.filter(e => e.uid === userF);
+    if (sevF) list = list.filter(e => String(e.sev || '').toUpperCase() === sevF);
+    const m: Record<string, { resource: string; count: number; sum: number; alerts: number }> = {};
+    list.forEach(e => {
+      const r = String(e.resource || 'unknown');
+      if (!m[r]) m[r] = { resource: r, count: 0, sum: 0, alerts: 0 };
+      m[r].count++;
+      m[r].sum += Number(e.score) || 0;
+      const sev = String(e.sev || '').toUpperCase();
+      if (sev === 'CRITICAL' || sev === 'HIGH') m[r].alerts++;
+    });
+    return Object.values(m)
+      .map(x => ({ ...x, avg: x.count ? Math.round(x.sum / x.count) : 0 }))
+      .sort((a, b) => b.alerts - a.alerts || b.avg - a.avg || b.count - a.count)
+      .slice(0, 6);
+  }, [sortedEvents, userF, sevF]);
+  const maxResourceCount = useMemo(() => Math.max(1, ...resourceInsights.map(r => r.count)), [resourceInsights]);
 
   const selStyle: React.CSSProperties = { background: C.bg2, border: `1px solid ${C.border2}`, borderRadius: 7,
     padding: '8px 10px', color: C.text2, fontSize: 12, outline: 'none', cursor: 'pointer', fontFamily: 'inherit' };
@@ -726,32 +758,54 @@ function TimelinePage({ data, onShowIncident }: { data: DerivedData; onShowIncid
         </Card>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Card>
-            <CardHeader><div style={{ fontSize: 13, fontWeight: 600 }}>Activity by Hour</div></CardHeader>
+            <CardHeader>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Risk Concentration by Hour</div>
+              <div style={{ fontSize: 11, color: C.text3 }}>Volume vs. avg risk</div>
+            </CardHeader>
             <CardBody>
               <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={hourly} margin={{ left: -20 }}>
+                <ComposedChart data={hourly} margin={{ left: -22, right: -22 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                   <XAxis dataKey="hour" tick={{ fill: C.text3, fontSize: 9 }} interval={3} />
-                  <YAxis tick={{ fill: C.text3, fontSize: 10 }} />
-                  <Tooltip contentStyle={TOOLTIP_STYLE} />
-                  <Bar dataKey="all" name="All" fill="rgba(77,171,247,0.3)" />
-                  <Bar dataKey="crit" name="Crit/High" fill="rgba(255,71,87,0.7)" />
-                </BarChart>
+                  <YAxis yAxisId="vol" tick={{ fill: C.text3, fontSize: 10 }} />
+                  <YAxis yAxisId="risk" orientation="right" domain={[0, 100]} tick={{ fill: C.text3, fontSize: 10 }} />
+                  <Tooltip contentStyle={TOOLTIP_STYLE}
+                    formatter={(v: number, n: string) => [v, n === 'avg' ? 'Avg risk' : n === 'all' ? 'Events' : 'Crit/High']} />
+                  <Bar yAxisId="vol" dataKey="all" name="all" fill="rgba(77,171,247,0.25)" radius={[2, 2, 0, 0]} />
+                  <Bar yAxisId="vol" dataKey="crit" name="crit" fill="rgba(255,71,87,0.55)" radius={[2, 2, 0, 0]} />
+                  <Line yAxisId="risk" type="monotone" dataKey="avg" name="avg" stroke={C.orange}
+                    strokeWidth={2} dot={false} />
+                </ComposedChart>
               </ResponsiveContainer>
+              <div style={{ marginTop: 8, fontSize: 11, color: C.text3 }}>
+                Peak-risk window <strong style={{ color: scoreColor(peakRisk.avg) }}>{peakRisk.hour}</strong> · avg risk{' '}
+                <strong style={{ color: scoreColor(peakRisk.avg) }}>{peakRisk.avg}</strong> across {peakRisk.all} events
+              </div>
             </CardBody>
           </Card>
           <Card>
-            <CardHeader><div style={{ fontSize: 13, fontWeight: 600 }}>Statistics</div></CardHeader>
-            <CardBody>
-              <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-                {[['CRITICAL', C.red], ['HIGH', C.orange], ['MEDIUM', C.yellow], ['LOW', C.green]].map(([s, c]) => (
-                  <div key={s}>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: c }}>{filtered.filter(e => e.sev === s).length}</div>
-                    <div style={{ fontSize: 11, color: C.text3 }}>{s}</div>
+            <CardHeader>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Most Targeted Resources</div>
+              <div style={{ fontSize: 11, color: C.text3 }}>{userF || sevF ? 'filtered' : 'all events'}</div>
+            </CardHeader>
+            <CardBody style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {resourceInsights.length === 0 ? (
+                <div style={{ fontSize: 12, color: C.text3 }}>No resources match the selected filters.</div>
+              ) : resourceInsights.map(r => (
+                <div key={r.resource}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, color: C.text2, fontWeight: 500 }}>{r.resource}</span>
+                    <span style={{ fontSize: 11, color: C.text3 }}>
+                      {r.count} events · <span style={{ color: scoreColor(r.avg), fontWeight: 700 }}>avg {r.avg}</span>
+                      {r.alerts > 0 && <span style={{ color: C.red, fontWeight: 700 }}> · {r.alerts} alerts</span>}
+                    </span>
                   </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 12, fontSize: 11, color: C.text3 }}>Showing most recent {filtered.length} events</div>
+                  <div style={{ height: 6, background: C.border, borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${(r.count / maxResourceCount) * 100}%`, height: '100%',
+                      background: scoreColor(r.avg), borderRadius: 3 }} />
+                  </div>
+                </div>
+              ))}
             </CardBody>
           </Card>
         </div>
@@ -970,27 +1024,48 @@ function UsersPage({ data, onShowUser }: { data: DerivedData; onShowUser: (uid: 
 }
 
 // ── Heatmap Page ───────────────────────────────────────────────────────
+type HeatMode = 'risk' | 'alerts' | 'volume';
+interface HeatCell { count: number; sum: number; alerts: number; avg: number }
 function HeatmapPage({ data }: { data: DerivedData }) {
   const { events, profiles, userRisk } = data;
+  const [mode, setMode] = useState<HeatMode>('risk');
 
   const heatmap = useMemo(() => {
-    const m: Record<string, Record<number, number>> = {};
+    const m: Record<string, Record<number, HeatCell>> = {};
     const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    days.forEach(d => { m[d] = {}; for (let h = 0; h < 24; h++) m[d][h] = 0; });
+    days.forEach(d => { m[d] = {}; for (let h = 0; h < 24; h++) m[d][h] = { count: 0, sum: 0, alerts: 0, avg: 0 }; });
     events.forEach(e => {
       const d = new Date(e.ts.replace(' ', 'T'));
       if (isNaN(d.getTime())) return;
-      const day = days[d.getDay()];
-      const hr = d.getHours();
-      m[day][hr]++;
+      const cell = m[days[d.getDay()]][d.getHours()];
+      cell.count++;
+      cell.sum += Number(e.score) || 0;
+      const sev = String(e.sev || '').toUpperCase();
+      if (sev === 'CRITICAL' || sev === 'HIGH') cell.alerts++;
     });
+    days.forEach(d => { for (let h = 0; h < 24; h++) { const c = m[d][h]; c.avg = c.count ? Math.round(c.sum / c.count) : 0; } });
     return { grid: m, days };
   }, [events]);
 
+  // Per-mode value extractor + max for normalising volume/alert intensity.
+  const cellVal = (c: HeatCell) => (mode === 'risk' ? c.avg : mode === 'alerts' ? c.alerts : c.count);
   const maxVal = useMemo(() => {
     let max = 0;
-    heatmap.days.forEach(d => { for (let h = 0; h < 24; h++) max = Math.max(max, heatmap.grid[d][h]); });
+    heatmap.days.forEach(d => { for (let h = 0; h < 24; h++) max = Math.max(max, cellVal(heatmap.grid[d][h])); });
     return max || 1;
+  }, [heatmap, mode]);
+
+  // Riskiest window + off-hours alert volume — analyst-facing call-outs.
+  const insight = useMemo(() => {
+    let peak = { day: '—', hr: 0, avg: 0, count: 0, alerts: 0 };
+    let offHoursAlerts = 0, totalAlerts = 0;
+    heatmap.days.forEach(d => { for (let h = 0; h < 24; h++) {
+      const c = heatmap.grid[d][h];
+      if (c.count >= 2 && c.avg > peak.avg) peak = { day: d, hr: h, avg: c.avg, count: c.count, alerts: c.alerts };
+      totalAlerts += c.alerts;
+      if (h < 7 || h >= 20 || d === 'Sat' || d === 'Sun') offHoursAlerts += c.alerts;
+    }});
+    return { peak, offHoursAlerts, totalAlerts };
   }, [heatmap]);
 
   const deptRisk = useMemo(() => {
@@ -1007,13 +1082,43 @@ function HeatmapPage({ data }: { data: DerivedData }) {
     <div style={{ padding: 24 }}>
       <Card style={{ marginBottom: 16 }}>
         <CardHeader>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Hour × Day Access Matrix</div>
-          <div style={{ display: 'flex', gap: 8, fontSize: 11, color: C.text3, alignItems: 'center' }}>
-            <span style={{ width: 10, height: 10, background: '#1a1f2e', borderRadius: 2, display: 'inline-block' }} /> Low
-            <span style={{ width: 10, height: 10, background: 'rgba(255,71,87,0.7)', borderRadius: 2, display: 'inline-block' }} /> High
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Hour × Day Risk Matrix</div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {([['risk', 'Avg Risk'], ['alerts', 'Alerts'], ['volume', 'Volume']] as [HeatMode, string][]).map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)}
+                style={{ padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  border: `1px solid ${mode === m ? C.blue : C.border2}`,
+                  background: mode === m ? C.blue : C.bg3, color: mode === m ? '#000' : C.text2 }}>
+                {label}
+              </button>
+            ))}
           </div>
         </CardHeader>
         <CardBody>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
+            <div style={{ background: C.bg3, border: `1px solid ${C.border}`, borderRadius: 8, padding: '8px 12px' }}>
+              <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.6 }}>Riskiest Window</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: scoreColor(insight.peak.avg) }}>
+                {insight.peak.day} {String(insight.peak.hr).padStart(2, '0')}:00 · avg {insight.peak.avg}
+              </div>
+              <div style={{ fontSize: 10, color: C.text3 }}>{insight.peak.count} events · {insight.peak.alerts} alerts</div>
+            </div>
+            <div style={{ background: C.bg3, border: `1px solid ${C.border}`, borderRadius: 8, padding: '8px 12px' }}>
+              <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.6 }}>Off-Hours Alerts</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.red }}>{insight.offHoursAlerts}</div>
+              <div style={{ fontSize: 10, color: C.text3 }}>
+                {insight.totalAlerts ? Math.round((insight.offHoursAlerts / insight.totalAlerts) * 100) : 0}% of all alerts
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', fontSize: 11, color: C.text3 }}>
+              {mode === 'risk' ? 'Low risk' : 'Low'}
+              <span style={{ width: 11, height: 11, background: C.green, borderRadius: 2 }} />
+              <span style={{ width: 11, height: 11, background: C.yellow, borderRadius: 2 }} />
+              <span style={{ width: 11, height: 11, background: C.orange, borderRadius: 2 }} />
+              <span style={{ width: 11, height: 11, background: C.red, borderRadius: 2 }} />
+              {mode === 'risk' ? 'High risk' : 'High'}
+            </div>
+          </div>
           <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 8 }}>
             <div style={{ width: 40 }} />
             {Array.from({ length: 24 }, (_, i) => (
@@ -1024,19 +1129,33 @@ function HeatmapPage({ data }: { data: DerivedData }) {
             <div key={day} style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 3 }}>
               <div style={{ width: 40, fontSize: 11, color: C.text2, textAlign: 'right', paddingRight: 6 }}>{day}</div>
               {Array.from({ length: 24 }, (_, h) => {
-                const v = heatmap.grid[day][h];
-                const intensity = v / maxVal;
+                const c = heatmap.grid[day][h];
+                const v = cellVal(c);
+                let bg = '#1a1f2e';
+                if (v > 0) {
+                  if (mode === 'risk') {
+                    // Color by severity, opacity by how busy the cell is.
+                    bg = scoreColor(c.avg);
+                  } else {
+                    bg = `rgba(255,71,87,${0.15 + (v / maxVal) * 0.85})`;
+                  }
+                }
+                const opacity = mode === 'risk' && v > 0 ? 0.35 + Math.min(c.count / maxVal, 1) * 0.65 : 1;
                 return (
-                  <div key={h} title={`${day} ${h}:00 — ${v} events`}
+                  <div key={h} title={`${day} ${h}:00 — ${c.count} events · avg risk ${c.avg} · ${c.alerts} alerts`}
                     style={{ flex: 1, aspectRatio: '1', borderRadius: 3, cursor: 'pointer',
-                      background: v === 0 ? '#1a1f2e' : `rgba(255,71,87,${0.15 + intensity * 0.85})`,
-                      transition: 'transform 0.1s' }}
+                      background: bg, opacity, transition: 'transform 0.1s' }}
                     onMouseEnter={el => (el.currentTarget.style.transform = 'scale(1.3)')}
                     onMouseLeave={el => (el.currentTarget.style.transform = 'scale(1)')} />
                 );
               })}
             </div>
           ))}
+          <div style={{ fontSize: 11, color: C.text3, marginTop: 10 }}>
+            {mode === 'risk' && 'Cell color = average risk score · brightness = activity volume. Bright red pockets are high-risk hotspots worth investigating.'}
+            {mode === 'alerts' && 'Cell intensity = number of HIGH/CRITICAL alerts in that hour×day window.'}
+            {mode === 'volume' && 'Cell intensity = total access events. Useful as a baseline of normal working rhythm.'}
+          </div>
         </CardBody>
       </Card>
 
