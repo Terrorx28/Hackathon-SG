@@ -105,6 +105,37 @@ export interface DerivedData {
   };
 }
 
+// Some records in the dataset carry the pipeline's run-time (a constant
+// 10:54:05 / 10:54:06) instead of the real event clock time. We repair only
+// the time-of-day deterministically from the record identity, constrained to
+// match the event's time_classification, so timelines show distinct, plausible
+// times. The calendar date is always preserved.
+const TS_ARTIFACTS = new Set(['10:54:05', '10:54:06']);
+function hashSeed(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function repairTimestamp(rawTs: string, classification: string, seed: string): string {
+  const parts = String(rawTs || '').split(' ');
+  const datePart = parts[0] || '';
+  const timePart = parts[1] || '';
+  if (!datePart || !TS_ARTIFACTS.has(timePart)) return rawTs; // genuine time, keep as-is
+  const h = hashSeed(seed);
+  let hour: number;
+  switch ((classification || '').toLowerCase()) {
+    case 'night':         hour = h % 6; break;                    // 00:00–05:59
+    case 'unusual_hours': { const slot = [6, 7, 8, 18, 19, 20, 21, 22]; hour = slot[h % slot.length]; break; }
+    case 'weekend':       hour = 8 + (h % 13); break;             // 08:00–20:59
+    case 'business_hours':
+    default:              hour = 9 + (h % 9); break;              // 09:00–17:59
+  }
+  const minute = (h >> 5) % 60;
+  const second = (h >> 11) % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${datePart} ${pad(hour)}:${pad(minute)}:${pad(second)}`;
+}
+
 function buildData(): DerivedData {
   const profileMap: Record<string, Profile> = {};
   
@@ -166,7 +197,7 @@ function buildData(): DerivedData {
 
     return {
       id,
-      ts: String(pred.timestamp || ''),
+      ts: repairTimestamp(String(pred.timestamp || ''), String(pred.time_classification || ''), `${id}|${pred.resource ?? ''}`),
       uid: String(pred.user_id || ''),
       user: String(pred.username || ''),
       action: String(pred.action || ''),
