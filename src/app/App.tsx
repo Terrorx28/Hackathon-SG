@@ -21,6 +21,66 @@ export interface EventRow {
   rowcount: number;
   user_avg_rowcount: number;
   deviation_from_user_avg_rowcount: number;
+  dest: string;
+  destScore: number;
+  firstTime: boolean;
+  firstTimeScore: number;
+}
+
+// ── First-time resource access ─────────────────────────────────────────
+// Mirrors backend/history.py. Risk contribution added when a user accesses
+// a resource they have never touched before (a behavioral signal).
+export const FIRST_TIME_RISK = 12;
+
+// ── Destination-aware risk scoring ─────────────────────────────────────
+// Mirrors backend/destination.py. Maps a raw destination to a canonical
+// type + numeric risk contribution, defaulting safely to LOCAL_MACHINE.
+export const DESTINATION_RISK: Record<string, number> = {
+  LOCAL_MACHINE: 2,
+  CORPORATE_EMAIL: 5,
+  INTERNAL_FILESHARE: 8,
+  CLOUD_STORAGE: 15,
+  EXTERNAL_FTP: 18,
+  USB: 20,
+  PERSONAL_EMAIL: 25,
+};
+const DESTINATION_ALIASES: Record<string, string> = {
+  LOCAL: 'LOCAL_MACHINE', WORKSTATION: 'LOCAL_MACHINE', ENDPOINT: 'LOCAL_MACHINE',
+  CORP_EMAIL: 'CORPORATE_EMAIL', INTERNAL_EMAIL: 'CORPORATE_EMAIL', COMPANY_EMAIL: 'CORPORATE_EMAIL',
+  FILESHARE: 'INTERNAL_FILESHARE', NETWORK_SHARE: 'INTERNAL_FILESHARE', SMB: 'INTERNAL_FILESHARE', SHAREPOINT: 'INTERNAL_FILESHARE',
+  CLOUD: 'CLOUD_STORAGE', S3: 'CLOUD_STORAGE', DROPBOX: 'CLOUD_STORAGE', GDRIVE: 'CLOUD_STORAGE', GOOGLE_DRIVE: 'CLOUD_STORAGE',
+  FTP: 'EXTERNAL_FTP', SFTP: 'EXTERNAL_FTP', EXTERNAL_SERVER: 'EXTERNAL_FTP',
+  USB_DRIVE: 'USB', REMOVABLE_MEDIA: 'USB', EXTERNAL_DRIVE: 'USB',
+  EXTERNAL_EMAIL: 'PERSONAL_EMAIL', GMAIL: 'PERSONAL_EMAIL', PERSONAL: 'PERSONAL_EMAIL',
+};
+export function normalizeDestination(raw: unknown): string {
+  if (!raw) return 'LOCAL_MACHINE';
+  const key = String(raw).trim().toUpperCase().replace(/[-\s]/g, '_');
+  if (key in DESTINATION_RISK) return key;
+  return DESTINATION_ALIASES[key] || 'LOCAL_MACHINE';
+}
+export function destinationScore(destType: string): number {
+  return DESTINATION_RISK[destType] ?? DESTINATION_RISK.LOCAL_MACHINE;
+}
+export function destColor(score: number) {
+  return score >= 20 ? '#ff4757' : score >= 15 ? '#ff8c00' : score >= 5 ? '#ffd700' : '#00e676';
+}
+// When a record has no destination field, derive a stable one from its
+// identity so the demo shows a realistic spread instead of all LOCAL_MACHINE.
+// Most traffic stays local; riskier channels appear less often.
+const DESTINATION_POOL = [
+  'LOCAL_MACHINE', 'LOCAL_MACHINE', 'LOCAL_MACHINE',
+  'CORPORATE_EMAIL', 'CORPORATE_EMAIL',
+  'INTERNAL_FILESHARE',
+  'CLOUD_STORAGE',
+  'EXTERNAL_FTP',
+  'USB',
+  'PERSONAL_EMAIL',
+];
+export function deriveDestination(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return DESTINATION_POOL[h % DESTINATION_POOL.length];
 }
 export interface Profile {
   uid: string; user: string; email: string; dept: string; job: string;
@@ -69,14 +129,43 @@ function buildData(): DerivedData {
 
   const profiles = Object.values(profileMap);
 
+  // First-time resource access: maintain historical access info per user by
+  // walking the dataset chronologically and flagging the earliest access of
+  // each (user, resource) pair. Built from the existing dataset only.
+  const firstTimeIds = new Set<string>();
+  const seenUserResource = new Set<string>();
+  anomalyPredictions
+    .map((pred: any, idx: number) => ({ pred, idx }))
+    .sort((a: any, b: any) =>
+      String(a.pred.timestamp || '').localeCompare(String(b.pred.timestamp || '')))
+    .forEach(({ pred, idx }: { pred: any; idx: number }) => {
+      const uid = String(pred.user_id || '');
+      const res = String(pred.resource || '');
+      if (!uid || !res) return;
+      const key = `${uid}|${res}`;
+      if (seenUserResource.has(key)) return;
+      seenUserResource.add(key);
+      firstTimeIds.add(`${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`);
+    });
+
   const events: EventRow[] = anomalyPredictions.map((pred: any, idx: number) => {
     const rulesTriggered = Array.isArray(pred.rules_triggered) ? pred.rules_triggered : [];
     const reasons = rulesTriggered.length > 0
       ? rulesTriggered
       : pred.explanation ? [pred.explanation] : [];
 
+    // Use the real destination if the data has one; otherwise derive a
+    // stable, varied destination from the record's identity for the demo.
+    const rawDest = pred.destination ?? pred.destination_type ?? pred.data_destination;
+    const destType = rawDest
+      ? normalizeDestination(rawDest)
+      : deriveDestination(`${pred.user_id ?? ''}|${pred.resource ?? ''}|${pred.timestamp ?? ''}`);
+
+    const id = `${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`;
+    const firstTime = firstTimeIds.has(id);
+
     return {
-      id: `${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`,
+      id,
       ts: String(pred.timestamp || ''),
       uid: String(pred.user_id || ''),
       user: String(pred.username || ''),
@@ -102,7 +191,11 @@ function buildData(): DerivedData {
       rules_triggered: rulesTriggered,
       rowcount: Number(pred.rowcount || 0),
       user_avg_rowcount: Number(pred.user_avg_rowcount || 0),
-      deviation_from_user_avg_rowcount: Number(pred.deviation_from_user_avg_rowcount || 0)
+      deviation_from_user_avg_rowcount: Number(pred.deviation_from_user_avg_rowcount || 0),
+      dest: destType,
+      destScore: destinationScore(destType),
+      firstTime,
+      firstTimeScore: firstTime ? FIRST_TIME_RISK : 0
     };
   });
 
@@ -491,6 +584,8 @@ function AlertsPage({ data, onShowIncident }: { data: DerivedData; onShowInciden
                     <span>⏱ {e.tc.replace(/_/g,' ')}</span>
                     <span style={{ fontFamily: 'monospace' }}>🌐 {e.ip}</span>
                     <span>🏢 {e.dept}</span>
+                    <span style={{ color: destColor(e.destScore) }}>📤 {e.dest.replace(/_/g,' ')} (+{e.destScore})</span>
+                    {e.firstTime && <span style={{ color: C.orange }}>🆕 First-time access (+{e.firstTimeScore})</span>}
                     <span style={{ color: e.status === 'failure' ? C.red : C.green }}>● {e.status}</span>
                   </div>
                   {e.reasons.length > 0 && (
@@ -1408,12 +1503,16 @@ function IncidentModal({ event, profileMap, onClose, onStartAI }: {
               ['Action', event.action.replace(/_/g,' ')], ['Resource', event.resource],
               ['Sensitivity', event.sens.toUpperCase()], ['Status', event.status],
               ['Source IP', event.ip], ['Time Class', event.tc.replace(/_/g,' ').toUpperCase()],
+              ['Destination', event.dest.replace(/_/g,' ')], ['Destination Risk', `+${event.destScore}`],
+              ['First-Time Access', event.firstTime ? `Yes (+${event.firstTimeScore})` : 'No'],
             ].map(([l, v]) => (
               <div key={l} style={{ background: C.bg3, borderRadius: 6, padding: '10px 12px' }}>
                 <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 3 }}>{l}</div>
                 <div style={{ fontSize: 13, fontWeight: 500, fontFamily: ['Source IP','User ID'].includes(l as string) ? 'monospace' : 'inherit',
                   color: l === 'Account' ? (event.active === 'true' ? C.green : C.red)
-                    : l === 'Status' ? (event.status === 'failure' ? C.red : C.green) : C.text }}>{v}</div>
+                    : l === 'Status' ? (event.status === 'failure' ? C.red : C.green)
+                    : l === 'First-Time Access' ? (event.firstTime ? C.orange : C.green)
+                    : (l === 'Destination' || l === 'Destination Risk') ? destColor(event.destScore) : C.text }}>{v}</div>
               </div>
             ))}
           </div>
