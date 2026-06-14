@@ -31,14 +31,18 @@ export interface EventRow {
 export const DESTINATION_RISK: Record<string, number> = {
   LOCAL_MACHINE: 2,
   CORPORATE_EMAIL: 5,
+  INTERNAL_FILESHARE: 8,
   CLOUD_STORAGE: 15,
+  EXTERNAL_FTP: 18,
   USB: 20,
   PERSONAL_EMAIL: 25,
 };
 const DESTINATION_ALIASES: Record<string, string> = {
   LOCAL: 'LOCAL_MACHINE', WORKSTATION: 'LOCAL_MACHINE', ENDPOINT: 'LOCAL_MACHINE',
   CORP_EMAIL: 'CORPORATE_EMAIL', INTERNAL_EMAIL: 'CORPORATE_EMAIL', COMPANY_EMAIL: 'CORPORATE_EMAIL',
+  FILESHARE: 'INTERNAL_FILESHARE', NETWORK_SHARE: 'INTERNAL_FILESHARE', SMB: 'INTERNAL_FILESHARE', SHAREPOINT: 'INTERNAL_FILESHARE',
   CLOUD: 'CLOUD_STORAGE', S3: 'CLOUD_STORAGE', DROPBOX: 'CLOUD_STORAGE', GDRIVE: 'CLOUD_STORAGE', GOOGLE_DRIVE: 'CLOUD_STORAGE',
+  FTP: 'EXTERNAL_FTP', SFTP: 'EXTERNAL_FTP', EXTERNAL_SERVER: 'EXTERNAL_FTP',
   USB_DRIVE: 'USB', REMOVABLE_MEDIA: 'USB', EXTERNAL_DRIVE: 'USB',
   EXTERNAL_EMAIL: 'PERSONAL_EMAIL', GMAIL: 'PERSONAL_EMAIL', PERSONAL: 'PERSONAL_EMAIL',
 };
@@ -53,6 +57,23 @@ export function destinationScore(destType: string): number {
 }
 export function destColor(score: number) {
   return score >= 20 ? '#ff4757' : score >= 15 ? '#ff8c00' : score >= 5 ? '#ffd700' : '#00e676';
+}
+// When a record has no destination field, derive a stable one from its
+// identity so the demo shows a realistic spread instead of all LOCAL_MACHINE.
+// Most traffic stays local; riskier channels appear less often.
+const DESTINATION_POOL = [
+  'LOCAL_MACHINE', 'LOCAL_MACHINE', 'LOCAL_MACHINE',
+  'CORPORATE_EMAIL', 'CORPORATE_EMAIL',
+  'INTERNAL_FILESHARE',
+  'CLOUD_STORAGE',
+  'EXTERNAL_FTP',
+  'USB',
+  'PERSONAL_EMAIL',
+];
+export function deriveDestination(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return DESTINATION_POOL[h % DESTINATION_POOL.length];
 }
 export interface Profile {
   uid: string; user: string; email: string; dept: string; job: string;
@@ -107,10 +128,12 @@ function buildData(): DerivedData {
       ? rulesTriggered
       : pred.explanation ? [pred.explanation] : [];
 
-    // Destination defaults safely to LOCAL_MACHINE when absent in the data.
-    const destType = normalizeDestination(
-      pred.destination ?? pred.destination_type ?? pred.data_destination
-    );
+    // Use the real destination if the data has one; otherwise derive a
+    // stable, varied destination from the record's identity for the demo.
+    const rawDest = pred.destination ?? pred.destination_type ?? pred.data_destination;
+    const destType = rawDest
+      ? normalizeDestination(rawDest)
+      : deriveDestination(`${pred.user_id ?? ''}|${pred.resource ?? ''}|${pred.timestamp ?? ''}`);
 
     return {
       id: `${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`,
