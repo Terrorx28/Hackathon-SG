@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import requests
 
 from destination import resolve_destination
+from history import resolve_first_time
 
 load_dotenv()
 
@@ -86,6 +87,7 @@ def investigate_access(access_data: dict) -> str:
     """
     
     destination_type, destination_score = resolve_destination(access_data)
+    is_first_time, _ = resolve_first_time(access_data)
 
     prompt = f"""Analyze this data access event and provide a concise, professional risk assessment:
 
@@ -95,6 +97,7 @@ Privilege: {access_data.get('privilege_level', 'user')}
 
 Action: {access_data.get('action', 'unknown').replace('_', ' ')}
 Resource: {access_data.get('resource', 'Unknown')} (Sensitivity: {access_data.get('resource_sensitivity', 'unknown').upper()})
+First-Time Resource Access: {'YES — user has never accessed this resource before' if is_first_time else 'No — user has accessed this resource before'}
 Destination: {destination_type.replace('_', ' ')} (destination risk contribution: {destination_score})
 Time: {access_data.get('timestamp', 'Unknown')} ({access_data.get('time_classification', 'unknown').replace('_', ' ')})
 Data Volume: {access_data.get('rowcount', 0)} rows (user avg: {access_data.get('user_avg_rowcount', 0)}, deviation: {access_data.get('deviation_from_user_avg_rowcount', 0)})
@@ -138,9 +141,14 @@ def _fallback_investigation(data: dict) -> str:
     deviation = data.get('deviation_from_user_avg_rowcount', 0)
     anomaly_score = data.get('ml_anomaly_score', 0)
     destination_type, destination_score = resolve_destination(data)
+    is_first_time, _ = resolve_first_time(data)
     
     # Build summary
     factors = []
+    
+    # First-time access to a resource is a strong behavioral signal.
+    if is_first_time:
+        factors.append(f"first-time access to {resource} (no prior history for this user)")
     
     if sensitivity == 'HIGH':
         factors.append(f"accessed high-sensitivity {resource}")

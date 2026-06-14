@@ -21,6 +21,11 @@ from destination import (
     resolve_destination,
     apply_destination_risk,
 )
+from history import (
+    FIRST_TIME_RISK,
+    resolve_first_time,
+    apply_first_time_risk,
+)
 
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 DEFAULT_LLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
@@ -152,6 +157,10 @@ def score_event():
         destination_type, destination_score = resolve_destination(data)
         risk_score = apply_destination_risk(base_risk, destination_score)
         
+        # First-time resource access (behavioral signal from historical index)
+        is_first_time, first_time_contribution = resolve_first_time(data)
+        risk_score = apply_first_time_risk(risk_score, first_time_contribution)
+        
         # Generate investigation
         investigation = investigate_access(data)
         
@@ -160,6 +169,8 @@ def score_event():
             'base_risk_score': base_risk,
             'destination_type': destination_type,
             'destination_score': destination_score,
+            'is_first_time_resource_access': is_first_time,
+            'first_time_score': first_time_contribution,
             'anomaly_detected': bool(is_anomaly),
             'anomaly_score': float(anomaly_score),
             'investigation': investigation,
@@ -219,6 +230,10 @@ def batch_score():
             destination_type, destination_score = resolve_destination(event)
             risk_score = apply_destination_risk(base_risk, destination_score)
             
+            # First-time resource access (behavioral signal from historical index)
+            is_first_time, first_time_contribution = resolve_first_time(event)
+            risk_score = apply_first_time_risk(risk_score, first_time_contribution)
+            
             results.append({
                 'user_id': event.get('user_id'),
                 'username': event.get('username'),
@@ -227,6 +242,8 @@ def batch_score():
                 'base_risk_score': base_risk,
                 'destination_type': destination_type,
                 'destination_score': destination_score,
+                'is_first_time_resource_access': is_first_time,
+                'first_time_score': first_time_contribution,
                 'anomaly_detected': model.predict(X)[0] == -1,
             })
         
@@ -249,9 +266,11 @@ def model_stats():
             'days_inactive',
             'time_class_score',
             'action_score',
-            'ml_anomaly_score'
+            'ml_anomaly_score',
+            'is_first_time_resource_access'
         ],
         'destination_risk': DESTINATION_RISK,
+        'first_time_risk': FIRST_TIME_RISK,
     })
 
 @app.route('/llm/chat', methods=['POST'])

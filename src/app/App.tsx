@@ -23,7 +23,14 @@ export interface EventRow {
   deviation_from_user_avg_rowcount: number;
   dest: string;
   destScore: number;
+  firstTime: boolean;
+  firstTimeScore: number;
 }
+
+// ── First-time resource access ─────────────────────────────────────────
+// Mirrors backend/history.py. Risk contribution added when a user accesses
+// a resource they have never touched before (a behavioral signal).
+export const FIRST_TIME_RISK = 12;
 
 // ── Destination-aware risk scoring ─────────────────────────────────────
 // Mirrors backend/destination.py. Maps a raw destination to a canonical
@@ -122,6 +129,25 @@ function buildData(): DerivedData {
 
   const profiles = Object.values(profileMap);
 
+  // First-time resource access: maintain historical access info per user by
+  // walking the dataset chronologically and flagging the earliest access of
+  // each (user, resource) pair. Built from the existing dataset only.
+  const firstTimeIds = new Set<string>();
+  const seenUserResource = new Set<string>();
+  anomalyPredictions
+    .map((pred: any, idx: number) => ({ pred, idx }))
+    .sort((a: any, b: any) =>
+      String(a.pred.timestamp || '').localeCompare(String(b.pred.timestamp || '')))
+    .forEach(({ pred, idx }: { pred: any; idx: number }) => {
+      const uid = String(pred.user_id || '');
+      const res = String(pred.resource || '');
+      if (!uid || !res) return;
+      const key = `${uid}|${res}`;
+      if (seenUserResource.has(key)) return;
+      seenUserResource.add(key);
+      firstTimeIds.add(`${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`);
+    });
+
   const events: EventRow[] = anomalyPredictions.map((pred: any, idx: number) => {
     const rulesTriggered = Array.isArray(pred.rules_triggered) ? pred.rules_triggered : [];
     const reasons = rulesTriggered.length > 0
@@ -135,8 +161,11 @@ function buildData(): DerivedData {
       ? normalizeDestination(rawDest)
       : deriveDestination(`${pred.user_id ?? ''}|${pred.resource ?? ''}|${pred.timestamp ?? ''}`);
 
+    const id = `${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`;
+    const firstTime = firstTimeIds.has(id);
+
     return {
-      id: `${String(pred.timestamp || 'unknown')}_${String(pred.user_id || 'anon')}_${idx}`,
+      id,
       ts: String(pred.timestamp || ''),
       uid: String(pred.user_id || ''),
       user: String(pred.username || ''),
@@ -164,7 +193,9 @@ function buildData(): DerivedData {
       user_avg_rowcount: Number(pred.user_avg_rowcount || 0),
       deviation_from_user_avg_rowcount: Number(pred.deviation_from_user_avg_rowcount || 0),
       dest: destType,
-      destScore: destinationScore(destType)
+      destScore: destinationScore(destType),
+      firstTime,
+      firstTimeScore: firstTime ? FIRST_TIME_RISK : 0
     };
   });
 
@@ -554,6 +585,7 @@ function AlertsPage({ data, onShowIncident }: { data: DerivedData; onShowInciden
                     <span style={{ fontFamily: 'monospace' }}>🌐 {e.ip}</span>
                     <span>🏢 {e.dept}</span>
                     <span style={{ color: destColor(e.destScore) }}>📤 {e.dest.replace(/_/g,' ')} (+{e.destScore})</span>
+                    {e.firstTime && <span style={{ color: C.orange }}>🆕 First-time access (+{e.firstTimeScore})</span>}
                     <span style={{ color: e.status === 'failure' ? C.red : C.green }}>● {e.status}</span>
                   </div>
                   {e.reasons.length > 0 && (
@@ -1472,12 +1504,14 @@ function IncidentModal({ event, profileMap, onClose, onStartAI }: {
               ['Sensitivity', event.sens.toUpperCase()], ['Status', event.status],
               ['Source IP', event.ip], ['Time Class', event.tc.replace(/_/g,' ').toUpperCase()],
               ['Destination', event.dest.replace(/_/g,' ')], ['Destination Risk', `+${event.destScore}`],
+              ['First-Time Access', event.firstTime ? `Yes (+${event.firstTimeScore})` : 'No'],
             ].map(([l, v]) => (
               <div key={l} style={{ background: C.bg3, borderRadius: 6, padding: '10px 12px' }}>
                 <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 3 }}>{l}</div>
                 <div style={{ fontSize: 13, fontWeight: 500, fontFamily: ['Source IP','User ID'].includes(l as string) ? 'monospace' : 'inherit',
                   color: l === 'Account' ? (event.active === 'true' ? C.green : C.red)
                     : l === 'Status' ? (event.status === 'failure' ? C.red : C.green)
+                    : l === 'First-Time Access' ? (event.firstTime ? C.orange : C.green)
                     : (l === 'Destination' || l === 'Destination Risk') ? destColor(event.destScore) : C.text }}>{v}</div>
               </div>
             ))}
