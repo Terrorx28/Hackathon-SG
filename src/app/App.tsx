@@ -1471,9 +1471,98 @@ function ReportsPage({ data }: { data: DerivedData }) {
   );
 }
 
+// ── Incident Investigation Timeline ────────────────────────────────────
+// Renders an ordered sequence of a user's events around the selected
+// incident: timestamp, user, resource, action, destination, and risk score.
+// Analyst-friendly forensic narrative (e.g. login → access → download → exfil).
+function timeOnly(ts: string) {
+  const d = new Date(ts.replace(' ', 'T'));
+  if (isNaN(d.getTime())) return ts;
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+}
+function actionPhrase(e: EventRow) {
+  const res = e.resource || 'resource';
+  switch (e.action) {
+    case 'login': return e.status === 'failure' ? 'Failed login attempt' : 'User login';
+    case 'file_access': return `Accessed ${res}`;
+    case 'sql_query': return `Queried ${res}`;
+    case 'api_call': return `API call to ${res}`;
+    case 'admin_operation': return `Admin operation on ${res}`;
+    case 'export_data':
+      return e.rowcount > 0 ? `Downloaded ${e.rowcount.toLocaleString()} rows from ${res}` : `Exported ${res}`;
+    default: return `${(e.action || 'action').replace(/_/g, ' ')} on ${res}`;
+  }
+}
+function IncidentTimeline({ event, events }: { event: EventRow; events: EventRow[] }) {
+  // Chronological sequence for this user; window around the selected incident.
+  const userEvents = events
+    .filter(e => e.uid === event.uid)
+    .sort((a, b) => new Date(a.ts.replace(' ', 'T')).getTime() - new Date(b.ts.replace(' ', 'T')).getTime());
+  const selIdx = userEvents.findIndex(e => e.id === event.id);
+  const start = Math.max(0, (selIdx < 0 ? userEvents.length : selIdx) - 6);
+  const window = userEvents.slice(start, start + 12);
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: C.text3, marginBottom: 12 }}>
+        Investigation Timeline — {event.user}
+      </div>
+      <div style={{ position: 'relative', paddingLeft: 8 }}>
+        {window.map((e, i) => {
+          const sel = e.id === event.id;
+          const col = scoreColor(e.score);
+          const last = i === window.length - 1;
+          return (
+            <div key={e.id} style={{ position: 'relative', display: 'flex', gap: 12, paddingBottom: last ? 0 : 14 }}>
+              {/* connector + node */}
+              <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 18 }}>
+                <div style={{ width: 12, height: 12, borderRadius: '50%', background: sel ? col : C.bg,
+                  border: `2px solid ${col}`, marginTop: 3, zIndex: 1,
+                  boxShadow: sel ? `0 0 0 4px ${col}33` : 'none' }} />
+                {!last && <div style={{ flex: 1, width: 2, background: C.border, marginTop: 2 }} />}
+              </div>
+              {/* content */}
+              <div style={{ flex: 1, background: sel ? C.bg4 : C.bg3, border: `1px solid ${sel ? col + '55' : C.border}`,
+                borderRadius: 8, padding: '8px 12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: C.text2, minWidth: 64 }}>{timeOnly(e.ts)}</span>
+                  <span style={{ fontSize: 13 }}>{actionIcon(e.action)}</span>
+                  <span style={{ fontSize: 13, fontWeight: sel ? 700 : 500, color: C.text }}>{actionPhrase(e)}</span>
+                  {sel && <SevBadge sev={e.sev} />}
+                  <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, color: col }}>{e.score}/100</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4, fontSize: 11, color: C.text3, flexWrap: 'wrap' }}>
+                  <span>Resource: <span style={{ color: C.text2 }}>{e.resource || '—'}</span></span>
+                  <span>· Destination: <span style={{ color: destColor(e.destScore) }}>{(e.dest || 'internal').replace(/_/g, ' ')}</span></span>
+                  {e.firstTime && <span style={{ color: C.orange }}>· first-time access</span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {/* terminal alert node for the selected incident */}
+        {(event.sev === 'CRITICAL' || event.sev === 'HIGH') && (
+          <div style={{ position: 'relative', display: 'flex', gap: 12, paddingTop: 14 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 18 }}>
+              <div style={{ width: 12, height: 12, borderRadius: '50%', background: C.red, border: `2px solid ${C.red}`,
+                boxShadow: `0 0 0 4px ${C.red}33` }} />
+            </div>
+            <div style={{ flex: 1, background: C.redDim, border: `1px solid ${C.redBorder}`, borderRadius: 8, padding: '8px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: C.red, minWidth: 64 }}>{timeOnly(event.ts)}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: C.red }}>⚠ {event.sev} alert generated</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Incident Modal ─────────────────────────────────────────────────────
-function IncidentModal({ event, profileMap, onClose, onStartAI }: {
-  event: EventRow; profileMap: Record<string, Profile>; onClose: () => void; onStartAI: (uid: string) => void;
+function IncidentModal({ event, events, profileMap, onClose, onStartAI }: {
+  event: EventRow; events: EventRow[]; profileMap: Record<string, Profile>; onClose: () => void; onStartAI: (uid: string) => void;
 }) {
   const p = profileMap[event.uid] || {} as Profile;
   return (
@@ -1516,6 +1605,8 @@ function IncidentModal({ event, profileMap, onClose, onStartAI }: {
               </div>
             ))}
           </div>
+
+          <IncidentTimeline event={event} events={events} />
 
           {Array.isArray(event.reasons) && event.reasons.length > 0 && (
             <div style={{ marginBottom: 16 }}>
@@ -1811,7 +1902,7 @@ export default function App() {
       {/* Modals */}
       {incidentId && (() => {
         const ev = data.events.find(e => e.id === incidentId);
-        return ev ? <IncidentModal event={ev} profileMap={data.profileMap}
+        return ev ? <IncidentModal event={ev} events={data.events} profileMap={data.profileMap}
           onClose={() => setIncidentId(null)}
           onStartAI={uid => { setIncidentId(null); handleStartAI(uid); }} /> : null;
       })()}
