@@ -1243,7 +1243,7 @@ function AnalyticsPage({ data }: { data: DerivedData }) {
                   <div style={{ fontSize: 12, color: C.text, marginBottom: 8 }}>
                     <div>🔄 Total events: <strong style={{ color: C.blue }}>{events.length}</strong></div>
                     <div style={{ marginTop: 6 }}>📊 Avg. volume per access: <strong style={{ color: C.blue }}>{(events.reduce((s, e) => s + e.rowcount, 0) / events.length).toFixed(0)}</strong> rows</div>
-                    <div style={{ marginTop: 6 }}>⚠️ First-time resources: <strong style={{ color: C.orange }}>{new Set(events.map(e => e.resource)).size}</strong> unique</div>
+                    <div style={{ marginTop: 6 }}>⚠️ First-time resource accesses: <strong style={{ color: C.orange }}>{events.filter(e => e.firstTime).length}</strong></div>
                   </div>
                 </div>
               ];
